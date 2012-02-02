@@ -294,6 +294,7 @@ def cmd_vk_dequeue(db):
             dequeue_text(db, text, 'vk.com')
 
 def dequeue_text(db, text, dest_type):
+    # FIXME: retweets are not dequeued
     rows = db.execute("""
         UPDATE queue SET done_ts = ?
         WHERE done_ts IS NULL
@@ -336,16 +337,26 @@ def vk_pusher(db, message, lat_unused, lon_unused):
 
 # http://juick.info/juick:http_api
 # http://juick.com/Dyn/1063956
+class JuickAuthHandler(urllib2.HTTPBasicAuthHandler):
+    def http_error_403(self, req, fp, code, msg, headers):
+        if 'www-authenticate' not in headers:
+            headers['www-authenticate'] = 'Basic realm="juick bug"'
+            return self.http_error_401(req, fp, code, msg, headers)
+        else:
+            raise RuntimeError, 'Juick is mad. RFC is not honored at all.'
+
 def juick_call(db, url, data=None, parse_json=True):
     url = 'http://api.juick.com' + url
     login, password = get_creds(db, 'juick.com')
     pwmgr = urllib2.HTTPPasswordMgrWithDefaultRealm()
     pwmgr.add_password(None, url, login, password) # None is the default realm
-    authhandler = urllib2.HTTPDigestAuthHandler(pwmgr)
+    authhandler = JuickAuthHandler(pwmgr)
     opener = urllib2.build_opener(authhandler)
     req = urllib2.Request(url=url)
+    req.add_header('User-Agent', 'twi2/0.1')
+    logging.info('Fetching API url: %s', url)
     resp = opener.open(req, data)
-    if json:
+    if parse_json:
         return json.load(resp)
     else:
         return resp
