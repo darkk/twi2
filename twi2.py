@@ -409,7 +409,8 @@ def main():
     if opt.log:
         logging_kvargs['filename'] = opt.log
     logging.basicConfig(**logging_kvargs)
-    logging.captureWarnings(True)
+    if callable(getattr('captureWarnings', logging, None)):
+        logging.captureWarnings(True)
     try:
         run(opt)
     except Exception:
