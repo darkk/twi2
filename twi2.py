@@ -4,7 +4,8 @@
 
 from urllib import urlencode, splitquery
 import random
-from urllib2 import urlopen, HTTPError
+from urllib2 import urlopen
+import urllib2
 from urlparse import parse_qs
 from Queue import Queue
 from threading import Thread
@@ -100,12 +101,14 @@ def cmd_twi_login(db, user_screenname):
     db.execute("INSERT INTO twitter_account VALUES(?)", (user_screenname,))
     db.commit()
 
+def twi_screen_name(db):
+    return db.execute("SELECT user_screenname FROM twitter_account").fetchone()[0]
+
 # https://dev.twitter.com/docs/api/1/get/statuses/user_timeline
 def twi_fetchapi(db, qs_ext):
-    screen_name = db.execute("SELECT user_screenname FROM twitter_account").fetchone()[0]
     url = 'http://api.twitter.com/1/statuses/user_timeline.json'
     query_string = {
-        'screen_name': screen_name,
+        'screen_name': twi_screen_name(db),
         'include_rts': 'true',
         'count': 100,
         'exclude_replies': 1,
@@ -137,7 +140,7 @@ def expand_url(url):
         fd = urlopen(url, timeout=15)
         fd.close()
         return fd.geturl() # redirections are processed by urllib2
-    except HTTPError, err:
+    except urllib2.HTTPError, err:
         # wikipedia returns 403 Forbidden, when it sees urllib
         logging.warning("Can't properly decode URL \"%s\" - returning last one" % url, exc_info=1)
         newurl = err.geturl()
@@ -259,13 +262,20 @@ def cmd_vk_login(db, client_id, client_secret):
     if 'error' in token or token['expires_in'] != 0:
         raise RuntimeError, 'Got bad token: %s' % repr(token)
     logging.info('Got token: %s', token)
+    save_creds(db, 'vk.com', token['user_id'], token['access_token'])
+
+def save_creds(db, dest_type, dest_login, dest_cred):
     db.execute(
-        "INSERT INTO destinations (dest_type, dest_login, dest_cred) VALUES('vk.com', ?, ?)",
-        (token['user_id'], token['access_token']))
+        "INSERT INTO destinations (dest_type, dest_login, dest_cred) VALUES(?, ?, ?)",
+        (dest_type, dest_login, dest_cred))
     db.commit()
 
+def get_creds(db, dest_type):
+    return db.execute("SELECT dest_login, dest_cred FROM destinations WHERE dest_type = ?",
+                      (dest_type,)).fetchone()
+
 def vk_call(db, method, **kvargs):
-    access_token = db.execute("SELECT dest_cred FROM destinations WHERE dest_type = 'vk.com'").fetchone()[0]
+    unused_user_id, access_token = get_creds(db, 'vk.com')
     query = {'access_token': access_token}
     query.update(kvargs)
     query = urlencode(query)
@@ -281,42 +291,92 @@ def cmd_vk_dequeue(db):
     wall_count = 20
     for e in vk_call(db, method='wall.get', count=wall_count)['response']:
         if isinstance(e, dict) and 'text' in e:
-            rows = db.execute("""
-                UPDATE queue SET done_ts = ?
-                WHERE done_ts IS NULL
-                AND status_id <= (
-                    SELECT status_id FROM rewritten WHERE rewritten_text = ?)
-                AND dest_id = (
-                    SELECT dest_id FROM destinations WHERE dest_type = 'vk.com')
-                """, (now(), e['text'])).rowcount
-            db.commit()
-            if rows != 0:
-                logging.info('Dequeued %d tasks', rows)
+            dequeue_text(db, text, 'vk.com')
+
+def dequeue_text(db, text, dest_type):
+    rows = db.execute("""
+        UPDATE queue SET done_ts = ?
+        WHERE done_ts IS NULL
+        AND status_id <= (
+            SELECT status_id FROM rewritten WHERE rewritten_text = ?)
+        AND dest_id = (
+            SELECT dest_id FROM destinations WHERE dest_type = ?)
+        """, (now(), text, dest_type)).rowcount
+    db.commit()
+    if rows != 0:
+        logging.info('Dequeued %d tasks', rows)
 
 def cmd_push(db):
     tasks = db.execute("""
-            SELECT dest_type, dest_id, t.status_id, rewritten_text
+            SELECT dest_type, dest_id, t.status_id, user_screenname, rewritten_text
             FROM (SELECT dest_id, MIN(status_id) AS status_id FROM queue WHERE done_ts IS NULL GROUP BY dest_id) AS t
             JOIN destinations USING (dest_id)
             JOIN rewritten ON (t.status_id = rewritten.status_id)
+            JOIN timeline ON (t.status_id = timeline.status_id)
             """).fetchall()
     random.shuffle(tasks)
     pusher = {
-        'vk.com': vk_pusher
+        'vk.com': vk_pusher,
+        'juick.com': juick_pusher,
     }
-    for dest_type, dest_id, status_id, rewritten_text in tasks:
-        # TODO: retweets! lat-lon! smarter URLs!
-        pusher[dest_type](db, rewritten_text.encode('utf-8'))
+    my_name = twi_screen_name(db)
+    for dest_type, dest_id, status_id, screen_name, rewritten_text in tasks:
+        # TODO: lat-lon! smarter URLs for vk.com! images for juick!
+        if my_name != screen_name: # TODO: user_id should be compared, screen_name may be changed
+            rewritten_text = u''.join(['RT @', screen_name, ': ', rewritten_text])
+        rewritten_text = rewritten_text.encode('utf-8')
+        pusher[dest_type](db, rewritten_text, lat, lon)
         db.execute('UPDATE queue SET done_ts = ? WHERE status_id = ? AND dest_id = ?',
                 (now(), status_id, dest_id))
         db.commit()
 
-def vk_pusher(db, message):
+def vk_pusher(db, message, lat_unused, lon_unused):
     response = vk_call(db, 'wall.post', message=message)
     logging.info('wall.post ok: post_id=%d', response['response']['post_id'])
 
+# http://juick.info/juick:http_api
+# http://juick.com/Dyn/1063956
+def juick_call(db, url, data=None, parse_json=True):
+    url = 'http://api.juick.com' + url
+    login, password = get_creds(db, 'juick.com')
+    pwmgr = urllib2.HTTPPasswordMgrWithDefaultRealm()
+    pwmgr.add_password(None, url, login, password) # None is the default realm
+    authhandler = urllib2.HTTPDigestAuthHandler(pwmgr)
+    opener = urllib2.build_opener(authhandler)
+    req = urllib2.Request(url=url)
+    resp = opener.open(req, data)
+    if json:
+        return json.load(resp)
+    else:
+        return resp
+
+def cmd_juick_dequeue(db, msgid):
+    login, unused_password = get_creds(db, 'juick.com')
+    for post in juick_call(db, '/thread?mid=%d' % msgid):
+        if post['user']['uname'] == login:
+            uid = post['user']['uid']
+            break
+    else:
+        raise RuntimeError, 'User %s was not found in #%d' % (login, msgid)
+    for post in juick_call(db, '/messages?user_id=%d' % int(uid)):
+        dequeue_text(db, post['body'], 'juick.com')
+
+def cmd_juick_login(db, login, password):
+    save_creds(db, 'juick.com', login, password)
+
+def juick_pusher(db, message, lat, lon):
+    query_string = {'body': message}
+    if lat is not None and lon is not None:
+        query_string['lat'] = lat
+        query_string['lon'] = lon
+    #acc — точность координат
+    #place_id — id места
+    #attach — Прикрепленный файл
+    fd = juick_call(db, '/post', data=urlencode(query_string), parse_json=False)
+    if fd.read() != '':
+        raise RuntimeError, 'Juick API failure'
+
 def main():
-    logging.basicConfig(level=logging.DEBUG)
     parser = OptionParser()
     parser.usage = 'Usage: %prog [options] <action> <action> ...'
     parser.add_option('-d', '--database', help='Use DATABASE as sqlite db to store queue.')
@@ -325,6 +385,8 @@ def main():
     parser.add_option('-K', '--vk-secret', help='Use VK_SECRET as application `client_secret` for vk.com API.')
     parser.add_option('-j', '--juick-login', help='Use JUICK_LOGIN for juick.com API.')
     parser.add_option('-J', '--juick-password', help='Use JUICK_PASSWORD for juick.com API.')
+    parser.add_option('-m', '--juick-msgid', help='Use JUICK_MSGID to get user `uid` for dequeue.', type=int)
+    parser.add_option('-l', '--log', help='Write log to LOG')
     known_args = {
         'twi_login': (cmd_twi_login, ('twi_name',)),
         'fetch_new': cmd_fetch_new,
@@ -334,7 +396,8 @@ def main():
         'rewrite': cmd_rewrite,
         'enqueue': cmd_enqueue,
         'push': cmd_push,
-        #'juick_login': (juick_login, ('juick_login', 'juick_password')),
+        'juick_login': (cmd_juick_login, ('juick_login', 'juick_password')),
+        'juick_dequeue': (cmd_juick_dequeue, ('juick_msgid',)),
     }
     parser.epilog = 'Actions: ' + ', '.join(sorted(known_args.keys()))
     opt, args = parser.parse_args()
@@ -342,6 +405,17 @@ def main():
         if action not in known_args:
             parser.error('Unknown action: <%s>' % action)
 
+    logging_kvargs = {'level': logging.DEBUG, 'format': '%(asctime)s %(levelname)s: %(message)s'}
+    if opt.log:
+        logging_kvargs['filename'] = opt.log
+    logging.basicConfig(**logging_kvargs)
+    logging.captureWarnings(True)
+    try:
+        run(opt)
+    except Exception:
+        logging.exception('FAIL!')
+
+def run(opt):
     db = sqlite3.connect(opt.database)
     scheme_update(db)
     for action in args:
