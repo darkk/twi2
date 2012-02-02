@@ -100,6 +100,7 @@ def cmd_twi_login(db, user_screenname):
     db.execute("INSERT INTO twitter_account VALUES(?)", (user_screenname,))
     db.commit()
 
+# https://dev.twitter.com/docs/api/1/get/statuses/user_timeline
 def twi_fetchapi(db, qs_ext):
     screen_name = db.execute("SELECT user_screenname FROM twitter_account").fetchone()[0]
     url = 'http://api.twitter.com/1/statuses/user_timeline.json'
@@ -206,6 +207,7 @@ def cmd_enqueue(db):
 # http://vk.com/developers.php?oid=-17680044&p=OAuth_Authorization_Dialog
 # http://vk.com/developers.php?o=-17680044&p=Application%20Access%20Rights
 # http://vk.com/developers.php?o=-17680044&p=Authorizing%20Sites
+# http://vk.com/developers.php?o=-1&p=%C2%FB%EF%EE%EB%ED%E5%ED%E8%E5%20%E7%E0%EF%F0%EE%F1%EE%E2%20%EA%20API
 def cmd_vk_login(db, client_id, client_secret):
     token_q = Queue()
     myhost = socket.getfqdn() # from DNS
