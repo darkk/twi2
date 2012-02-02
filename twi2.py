@@ -308,7 +308,7 @@ def dequeue_text(db, text, dest_type):
 
 def cmd_push(db):
     tasks = db.execute("""
-            SELECT dest_type, dest_id, t.status_id, user_screenname, rewritten_text
+            SELECT dest_type, dest_id, t.status_id, user_screenname, lat, lon, rewritten_text
             FROM (SELECT dest_id, MIN(status_id) AS status_id FROM queue WHERE done_ts IS NULL GROUP BY dest_id) AS t
             JOIN destinations USING (dest_id)
             JOIN rewritten ON (t.status_id = rewritten.status_id)
@@ -320,8 +320,8 @@ def cmd_push(db):
         'juick.com': juick_pusher,
     }
     my_name = twi_screen_name(db)
-    for dest_type, dest_id, status_id, screen_name, rewritten_text in tasks:
-        # TODO: lat-lon! smarter URLs for vk.com! images for juick!
+    for dest_type, dest_id, status_id, screen_name, lat, lon, rewritten_text in tasks:
+        # TODO: smarter URLs for vk.com! images for juick!
         if my_name != screen_name: # TODO: user_id should be compared, screen_name may be changed
             rewritten_text = u''.join(['RT @', screen_name, ': ', rewritten_text])
         rewritten_text = rewritten_text.encode('utf-8')
@@ -376,6 +376,19 @@ def juick_pusher(db, message, lat, lon):
     if fd.read() != '':
         raise RuntimeError, 'Juick API failure'
 
+KNOWN_ARGS = {
+    'twi_login': (cmd_twi_login, ('twi_name',)),
+    'fetch_new': cmd_fetch_new,
+    'fetch_old': cmd_fetch_old,
+    'vk_login': (cmd_vk_login, ('vk_client', 'vk_secret')),
+    'vk_dequeue': cmd_vk_dequeue,
+    'rewrite': cmd_rewrite,
+    'enqueue': cmd_enqueue,
+    'push': cmd_push,
+    'juick_login': (cmd_juick_login, ('juick_login', 'juick_password')),
+    'juick_dequeue': (cmd_juick_dequeue, ('juick_msgid',)),
+}
+
 def main():
     parser = OptionParser()
     parser.usage = 'Usage: %prog [options] <action> <action> ...'
@@ -387,43 +400,31 @@ def main():
     parser.add_option('-J', '--juick-password', help='Use JUICK_PASSWORD for juick.com API.')
     parser.add_option('-m', '--juick-msgid', help='Use JUICK_MSGID to get user `uid` for dequeue.', type=int)
     parser.add_option('-l', '--log', help='Write log to LOG')
-    known_args = {
-        'twi_login': (cmd_twi_login, ('twi_name',)),
-        'fetch_new': cmd_fetch_new,
-        'fetch_old': cmd_fetch_old,
-        'vk_login': (cmd_vk_login, ('vk_client', 'vk_secret')),
-        'vk_dequeue': cmd_vk_dequeue,
-        'rewrite': cmd_rewrite,
-        'enqueue': cmd_enqueue,
-        'push': cmd_push,
-        'juick_login': (cmd_juick_login, ('juick_login', 'juick_password')),
-        'juick_dequeue': (cmd_juick_dequeue, ('juick_msgid',)),
-    }
-    parser.epilog = 'Actions: ' + ', '.join(sorted(known_args.keys()))
+    parser.epilog = 'Actions: ' + ', '.join(sorted(KNOWN_ARGS.keys()))
     opt, args = parser.parse_args()
     for action in args:
-        if action not in known_args:
+        if action not in KNOWN_ARGS:
             parser.error('Unknown action: <%s>' % action)
 
     logging_kvargs = {'level': logging.DEBUG, 'format': '%(asctime)s %(levelname)s: %(message)s'}
     if opt.log:
         logging_kvargs['filename'] = opt.log
     logging.basicConfig(**logging_kvargs)
-    if callable(getattr('captureWarnings', logging, None)):
+    if callable(getattr(logging, 'captureWarnings', None)):
         logging.captureWarnings(True)
     try:
-        run(opt)
+        run(opt, args)
     except Exception:
         logging.exception('FAIL!')
 
-def run(opt):
+def run(opt, args):
     db = sqlite3.connect(opt.database)
     scheme_update(db)
     for action in args:
-        if callable(known_args[action]):
-            func, args = known_args[action], []
+        if callable(KNOWN_ARGS[action]):
+            func, args = KNOWN_ARGS[action], []
         else:
-            func, args = known_args[action]
+            func, args = KNOWN_ARGS[action]
         args = [getattr(opt, key) for key in args]
         if not all(args):
             raise RuntimeError, 'Some args are missing for action <%s>' % action
