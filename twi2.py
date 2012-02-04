@@ -265,9 +265,15 @@ def cmd_vk_login(db, client_id, client_secret):
     save_creds(db, 'vk.com', token['user_id'], token['access_token'])
 
 def save_creds(db, dest_type, dest_login, dest_cred):
-    db.execute(
-        "INSERT INTO destinations (dest_type, dest_login, dest_cred) VALUES(?, ?, ?)",
-        (dest_type, dest_login, dest_cred))
+    row = db.execute('SELECT dest_id FROM destinations WHERE dest_type = ? AND dest_login = ?',
+                     (dest_type, dest_login)).fetchone()
+    if row is not None:
+        # INSERT OR REPLACE INTO ... will damage `dest_id` as soon as it's AUTOINCREMENT
+        db.execute("UPDATE destinations SET dest_cred = ? WHERE dest_id = ?", (dest_cred, row[0]))
+    else:
+        db.execute(
+            "INSERT INTO destinations (dest_type, dest_login, dest_cred) VALUES(?, ?, ?)",
+            (dest_type, dest_login, dest_cred))
     db.commit()
 
 def get_creds(db, dest_type):
