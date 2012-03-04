@@ -325,6 +325,12 @@ def dequeue_text(db, text, dest_type):
     if rows != 0:
         logging.info('Dequeued %d tasks', rows)
 
+def fmt_tweet(db, user_screenname, rewritten_text):
+    my_name = twi_screen_name(db)
+    if my_name != user_screenname: # TODO: user_id should be compared, screen_name may be changed
+        rewritten_text = u''.join(['RT @', screen_name, ': ', rewritten_text])
+    return rewritten_text
+
 def cmd_push(db):
     tasks = db.execute("""
             SELECT dest_type, dest_id, t.status_id, user_screenname, lat, lon, rewritten_text
@@ -338,11 +344,9 @@ def cmd_push(db):
         'vk.com': vk_pusher,
         'juick.com': juick_pusher,
     }
-    my_name = twi_screen_name(db)
     for dest_type, dest_id, status_id, screen_name, lat, lon, rewritten_text in tasks:
         # TODO: smarter URLs for vk.com! images for juick!
-        if my_name != screen_name: # TODO: user_id should be compared, screen_name may be changed
-            rewritten_text = u''.join(['RT @', screen_name, ': ', rewritten_text])
+        rewritten_text = fmt_tweet(db, screen_name, rewritten_text)
         rewritten_text = rewritten_text.encode('utf-8')
         pusher[dest_type](db, rewritten_text, lat, lon)
         db.execute('UPDATE queue SET done_ts = ? WHERE status_id = ? AND dest_id = ?',
@@ -419,6 +423,24 @@ KNOWN_ARGS = {
     'juick_dequeue': (cmd_juick_dequeue, ('juick_msgid',)),
 }
 
+def warn_on_stale(db):
+    max_delay = 4 * 60 * 60 # 4 hours
+    tasks = db.execute("""
+            SELECT status_id, dest_id, dest_type, start_ts
+            FROM queue
+            JOIN destinations USING (dest_id)
+            WHERE done_ts IS NULL AND warn_ts < ?
+            """, (now() - max_delay,)).fetchall()
+    for status_id, dest_id, dest_type, start_ts in tasks:
+        # TODO: it should be logger configuration, to log some sorts of messages to stdout
+        msg = "Stale message for %s since %s" % (dest_type, time.ctime(start_ts))
+        logging.warning(msg)
+        print msg
+        db.execute("UPDATE queue SET warn_ts = ? WHERE status_id = ? AND dest_id = ?",
+                   (now(), status_id, dest_id))
+    db.commit()
+
+
 def main():
     parser = OptionParser()
     parser.usage = 'Usage: %prog [options] <action> <action> ...'
@@ -450,6 +472,7 @@ def main():
 def run(opt, args):
     db = sqlite3.connect(opt.database)
     scheme_update(db)
+    warn_on_stale(db)
     for action in args:
         if callable(KNOWN_ARGS[action]):
             func, args = KNOWN_ARGS[action], []
