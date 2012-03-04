@@ -339,7 +339,7 @@ def cmd_push(db):
 
 def vk_pusher(db, message, lat_unused, lon_unused):
     response = vk_call(db, 'wall.post', message=message)
-    logging.info('wall.post ok: post_id=%d', response['response']['post_id'])
+    logging.info('vk.com: wall.post ok, post_id=%d', response['response']['post_id'])
 
 # http://juick.info/juick:http_api
 # http://juick.com/Dyn/1063956
@@ -392,6 +392,7 @@ def juick_pusher(db, message, lat, lon):
     fd = juick_call(db, '/post', data=urlencode(query_string), parse_json=False)
     if fd.read() != '':
         raise RuntimeError, 'Juick API failure'
+    logging.info('juick.com: /post ok: empty response')
 
 KNOWN_ARGS = {
     'twi_login': (cmd_twi_login, ('twi_name',)),
