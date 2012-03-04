@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 # -- Leonid Evdokimov <leon@darkk.net.ru>
 
+import sys
 from urllib import urlencode, splitquery
 import random
 from urllib2 import urlopen
@@ -280,15 +281,26 @@ def get_creds(db, dest_type):
     return db.execute("SELECT dest_login, dest_cred FROM destinations WHERE dest_type = ?",
                       (dest_type,)).fetchone()
 
+def vk_call_url(method, query):
+    query_string = urlencode(query)
+    url = ''.join(['https://api.vk.com/method/', method, '?', query_string])
+    logging.info('Fetching API url: %s', url)
+    resp = urlopen(url)
+    return json.load(resp)
+
 def vk_call(db, method, **kvargs):
     unused_user_id, access_token = get_creds(db, 'vk.com')
     query = {'access_token': access_token}
     query.update(kvargs)
-    query = urlencode(query)
-    url = ''.join(['https://api.vk.com/method/', method, '?', query])
-    logging.info('Fetching API url: %s', url)
-    resp = urlopen(url)
-    d = json.load(resp)
+    d = vk_call_url(method, query)
+    if 'error' in d:
+        if sys.stdin.isatty() and d['error']['error_code'] == 14: # captcha
+            print "Error (captcha):", d['error']
+            sys.stdout.write('Enter captcha: ')
+            sys.stdout.flush()
+            query['captcha_sid'] = d['error']['captcha_sid']
+            query['captcha_key'] = sys.stdin.readline().strip()
+            d = vk_call_url(method, query)
     if 'error' in d:
         raise RuntimeError, str(d)
     return d
