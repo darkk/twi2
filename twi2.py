@@ -7,7 +7,7 @@ from urllib import urlencode, splitquery
 import random
 from urllib2 import urlopen
 import urllib2
-from urlparse import parse_qs
+from urlparse import parse_qs, urlsplit
 from Queue import Queue
 from threading import Thread
 import socket
@@ -212,28 +212,69 @@ def cmd_enqueue(db):
 # http://vk.com/developers.php?o=-17680044&p=Application%20Access%20Rights
 # http://vk.com/developers.php?o=-17680044&p=Authorizing%20Sites
 # http://vk.com/developers.php?o=-1&p=%C2%FB%EF%EE%EB%ED%E5%ED%E8%E5%20%E7%E0%EF%F0%EE%F1%EE%E2%20%EA%20API
+HASH_TO_QS_PAGE = """<html>
+<head>
+    <script type="text/javascript">
+        (function() {
+            var wl = window.location;
+            var dest = wl.protocol + '//' + wl.host + wl.pathname;
+            if (wl.search.length > 0) {
+                dest += wl.search;
+                dest += "&";
+            }
+            else {
+                dest += "?";
+            }
+            if (wl.hash.length > 1) {
+                dest += wl.hash.substr(1);
+                window.location = dest;
+            }
+        })();
+    </script>
+</head>
+<body>
+    Converting #foo to ?bar...
+</body>
+</html>"""
+# Traffic to http://oauth.vk.com/blank.html may be redirected with proxy.pac like that:
+# function FindProxyForURL(url, host) {
+#     var vkurl = "http://oauth.vk.com/blank.html";
+#     if (url.substr(0, vkurl.length) == vkurl) {
+#         return "PROXY twi2.example.org:1925";
+#     }
+#     else {
+#         return "DIRECT";
+#     }
+# }
 def cmd_vk_login(db, client_id, client_secret):
     token_q = Queue()
     myhost = socket.getfqdn() # from DNS
     myport = 1925
-    path = '/twi2/auth-gate'
+    path = '/blank.html'
+
     class VkCodeHandler(BaseHTTPServer.BaseHTTPRequestHandler):
         def do_GET(self):
             logging.info('GET callback from VK: %s', self.path)
-            qpath, query_string = splitquery(self.path)
-            if query_string is None:
-                query_string = ''
-            q = parse_qs(query_string)
-            if qpath != path or 'code' not in q:
-                self.send_response(500)
-                self.end_headers()
-            token_q.put(q['code'][0])
-            self.send_response(200)
-            reply = 'Ok, go to [s]hell.'
-            self.send_header('content-length', len(reply))
-            self.send_header('content-type', 'text/plain')
+            if self.path[0] == '/':
+                qpath, query_string = splitquery(self.path)
+            else:
+                scheme, netloc, qpath, query_string, fragment = urlsplit(self.path)
+            if qpath != path:
+                return self.__reply(404, 'text/plain', 'Not found.')
+            if query_string is None or query_string == '':
+                self.__reply(200, 'text/html', HASH_TO_QS_PAGE)
+            else:
+                qs = parse_qs(query_string)
+                token_q.put(qs)
+                self.__reply(200, 'text/plain', 'Ok, go to [s]hell.')
+
+        def __reply(self, code, ctype, blob):
+            self.send_response(code)
+            self.send_header('content-length', len(blob))
+            self.send_header('content-type', ctype)
             self.end_headers()
-            self.wfile.write(reply)
+            self.wfile.write(blob)
+
         def log_message(self, format, *args):
             logging.info("%s %s" % (self.address_string(), format%args))
 
@@ -245,25 +286,27 @@ def cmd_vk_login(db, client_id, client_secret):
     query_string = urlencode({
         'client_id': client_id,
         'scope': 'wall,offline',
-        'redirect_uri': 'http://%s:%u%s' % (myhost, myport, path),
-        'response_type': 'code'})
+        'redirect_uri': 'http://oauth.vk.com%s' % (path),
+        'response_type': 'token'})
     logging.info('Go to: http://oauth.vk.com/authorize?' + query_string)
 
-    code = token_q.get()
+    qs = token_q.get()
     srv.shutdown()
     thr.join()
-    logging.info('Got code for token: %s', code)
+    logging.info('Got code for token: %s', qs)
 
-    query_string = urlencode({
-        'client_id': client_id,
-        'code': code,
-        'client_secret': client_secret})
-    resp = urlopen('https://api.vk.com/oauth/access_token?' + query_string)
-    token = json.load(resp)
-    if 'error' in token or token['expires_in'] != 0:
-        raise RuntimeError, 'Got bad token: %s' % repr(token)
-    logging.info('Got token: %s', token)
-    save_creds(db, 'vk.com', token['user_id'], token['access_token'])
+    if 'error' in qs:
+        raise RuntimeError, 'Got bad token: %s' % repr(qs)
+    access_token, user_id = qs['access_token'][0], qs['user_id'][0]
+    save_creds(db, 'vk.com', user_id, access_token)
+    vk_verify_creds(db, client_id)
+
+def vk_verify_creds(db, client_id):
+    user_settings = vk_call(db, 'getUserSettings', uid=client_id)
+    if user_settings.get("response", 0) & 8192:
+        logging.info('Ok, got wall-write perms, user settings: %s', user_settings)
+    else:
+        logging.warning('No wall-write perms, user settings: %s', user_settings)
 
 def save_creds(db, dest_type, dest_login, dest_cred):
     row = db.execute('SELECT dest_id FROM destinations WHERE dest_type = ? AND dest_login = ?',
